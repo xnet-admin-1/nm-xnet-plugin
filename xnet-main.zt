@@ -1,0 +1,9 @@
+[connection]
+id=XNet Main
+type=vpn
+
+[vpn]
+service-type=org.freedesktop.NetworkManager.zerotier
+data.network-id=d88e73ff30fdf2b0
+data.moon-id=d88e73ff30
+data.controller=192.168.0.12
