@@ -1,223 +1,225 @@
 #!/usr/bin/env python3
 """
 NetworkManager VPN plugin for ZeroTier
-Manages zerotier-one daemon and reports tunnel interface to NM.
 Copyright (C) 2025-present XNet Inc. Apache-2.0
 """
 
-import sys
-import os
-import json
-import time
-import signal
-import subprocess
-import dbus
-import dbus.service
-import dbus.mainloop.glib
+import sys, os, json, time, signal, subprocess, struct, socket
+import dbus, dbus.service, dbus.mainloop.glib
 from gi.repository import GLib
 
-NM_VPN_SERVICE_NAME = "org.freedesktop.NetworkManager.zerotier"
-NM_VPN_PLUGIN_PATH = "/org/freedesktop/NetworkManager/VPN/Plugin"
+NM_VPN_SERVICE = "org.freedesktop.NetworkManager.zerotier"
+NM_VPN_PATH = "/org/freedesktop/NetworkManager/VPN/Plugin"
 
-# NM VPN states
-NM_VPN_STATE_UNKNOWN = 0
-NM_VPN_STATE_INIT = 1
-NM_VPN_STATE_STARTING = 2
-NM_VPN_STATE_STARTED = 3
-NM_VPN_STATE_STOPPING = 4
-NM_VPN_STATE_STOPPED = 5
-NM_VPN_STATE_FAILED = 6
+INIT, STARTING, STARTED, STOPPING, STOPPED, FAILED = 1, 2, 3, 4, 5, 6
 
-ZT_BINARY = "/usr/sbin/zerotier-one"
+ZT = "/usr/sbin/zerotier-one"
 ZT_HOME = "/var/lib/zerotier-one"
 
 
-class ZeroTierVPNPlugin(dbus.service.Object):
-    def __init__(self, bus, object_path):
-        super().__init__(bus, object_path)
-        self._state = NM_VPN_STATE_INIT
-        self._zt_proc = None
-        self._network_id = None
-        self._check_timer = None
+def ip2int(s):
+    return struct.unpack("<I", socket.inet_aton(s))[0]
 
-    def _set_state(self, state):
-        if self._state != state:
-            self._state = state
-            self.StateChanged(state)
 
-    @dbus.service.method(
-        "org.freedesktop.NetworkManager.VPN.Plugin",
-        in_signature="a{sa{sv}}",
-        out_signature="",
+def zt_cli(args):
+    return subprocess.run(
+        [ZT, "-q", "-D" + ZT_HOME] + args,
+        capture_output=True, text=True, timeout=5,
     )
+
+
+def zt_json(args):
+    r = subprocess.run(
+        [ZT, "-q", "-j", "-D" + ZT_HOME] + args,
+        capture_output=True, text=True, timeout=5,
+    )
+    return json.loads(r.stdout) if r.returncode == 0 else None
+
+
+class ZeroTierVPN(dbus.service.Object):
+    def __init__(self, bus, path):
+        super().__init__(bus, path)
+        self._state = INIT
+        self._nwid = None
+        self._timer = None
+        self._connected = False
+
+    def _set_state(self, s):
+        if self._state != s:
+            self._state = s
+            self.StateChanged(s)
+
+    # ── D-Bus methods ──
+
+    @dbus.service.method("org.freedesktop.NetworkManager.VPN.Plugin",
+                         in_signature="a{sa{sv}}", out_signature="")
     def Connect(self, connection):
-        try:
-            print(f"Connect called with: {dict(connection)}", file=sys.stderr)
-            vpn_settings = connection.get("vpn", {})
-            # NM sends vpn data as a dict under the 'data' key
-            vpn_data = {}
-            if "data" in vpn_settings:
-                vpn_data = dict(vpn_settings["data"])
-            self._network_id = str(vpn_data.get("network-id", ""))
-            controller = str(vpn_data.get("controller", ""))
-            moon_id = str(vpn_data.get("moon-id", ""))
+        self._do_connect(connection)
 
-            if not self._network_id:
-                self._set_state(NM_VPN_STATE_FAILED)
-                self.Failure(2)  # bad arguments
-                return
-
-            self._set_state(NM_VPN_STATE_STARTING)
-
-            # Ensure zerotier-one is running
-            if not self._is_zt_running():
-                subprocess.Popen(
-                    [ZT_BINARY, ZT_HOME],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                for _ in range(10):
-                    time.sleep(1)
-                    if self._is_zt_running():
-                        break
-
-            # Join network
-            self._zt_cli(["join", self._network_id])
-
-            # Orbit moon if specified
-            if moon_id:
-                self._zt_cli(["orbit", moon_id, moon_id])
-
-            # Poll for interface to come up
-            self._check_timer = GLib.timeout_add(1000, self._check_connected)
-
-        except Exception as e:
-            print(f"Connect error: {e}", file=sys.stderr)
-            self._set_state(NM_VPN_STATE_FAILED)
-            self.Failure(1)
-
-    @dbus.service.method(
-        "org.freedesktop.NetworkManager.VPN.Plugin",
-        in_signature="a{sa{sv}}a{sa{sv}}",
-        out_signature="",
-    )
+    @dbus.service.method("org.freedesktop.NetworkManager.VPN.Plugin",
+                         in_signature="a{sa{sv}}a{sa{sv}}", out_signature="")
     def ConnectInteractive(self, connection, details):
-        self.Connect(connection)
+        self._do_connect(connection)
 
-    @dbus.service.method(
-        "org.freedesktop.NetworkManager.VPN.Plugin",
-        in_signature="a{sa{sv}}",
-        out_signature="s",
-    )
+    @dbus.service.method("org.freedesktop.NetworkManager.VPN.Plugin",
+                         in_signature="a{sa{sv}}", out_signature="s")
     def NeedSecrets(self, settings):
         return ""
 
-    @dbus.service.method(
-        "org.freedesktop.NetworkManager.VPN.Plugin", in_signature="", out_signature=""
-    )
+    @dbus.service.method("org.freedesktop.NetworkManager.VPN.Plugin",
+                         in_signature="", out_signature="")
     def Disconnect(self):
-        self._set_state(NM_VPN_STATE_STOPPING)
-        if self._check_timer:
-            GLib.source_remove(self._check_timer)
-            self._check_timer = None
-        self._set_state(NM_VPN_STATE_STOPPED)
+        self._set_state(STOPPING)
+        if self._timer:
+            GLib.source_remove(self._timer)
+            self._timer = None
+        self._connected = False
+        self._set_state(STOPPED)
 
-    @dbus.service.method(
-        "org.freedesktop.NetworkManager.VPN.Plugin",
-        in_signature="",
-        out_signature="u",
-    )
+    @dbus.service.method("org.freedesktop.NetworkManager.VPN.Plugin",
+                         in_signature="", out_signature="u")
     def State(self):
         return dbus.UInt32(self._state)
 
-    @dbus.service.signal(
-        "org.freedesktop.NetworkManager.VPN.Plugin", signature="u"
-    )
+    # ── D-Bus signals ──
+
+    @dbus.service.signal("org.freedesktop.NetworkManager.VPN.Plugin", signature="u")
     def StateChanged(self, state):
         pass
 
-    @dbus.service.signal(
-        "org.freedesktop.NetworkManager.VPN.Plugin", signature="a{sv}"
-    )
+    @dbus.service.signal("org.freedesktop.NetworkManager.VPN.Plugin", signature="a{sv}")
     def Ip4Config(self, config):
         pass
 
-    @dbus.service.signal(
-        "org.freedesktop.NetworkManager.VPN.Plugin", signature="u"
-    )
+    @dbus.service.signal("org.freedesktop.NetworkManager.VPN.Plugin", signature="u")
     def Failure(self, reason):
         pass
 
-    def _is_zt_running(self):
+    # ── Logic ──
+
+    def _do_connect(self, connection):
         try:
-            r = subprocess.run(
-                [ZT_BINARY, "-q", "-D" + ZT_HOME, "status"],
-                capture_output=True, text=True, timeout=3,
-            )
-            return "ONLINE" in r.stdout
-        except Exception:
+            vpn = connection.get("vpn", {})
+            data = dict(vpn.get("data", {}))
+            self._nwid = str(data.get("network-id", ""))
+            moon = str(data.get("moon-id", ""))
+
+            if not self._nwid:
+                self._set_state(FAILED)
+                self.Failure(2)
+                return
+
+            # Check NM connection's never-default setting
+            ipv4 = connection.get("ipv4", {})
+            self._never_default = bool(ipv4.get("never-default", True))
+
+            self._set_state(STARTING)
+
+            # Ensure ZT daemon running
+            try:
+                r = zt_cli(["status"])
+                if "ONLINE" not in r.stdout:
+                    raise Exception("not online")
+            except Exception:
+                subprocess.Popen([ZT, ZT_HOME],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(10):
+                    time.sleep(1)
+                    try:
+                        if "ONLINE" in zt_cli(["status"]).stdout:
+                            break
+                    except Exception:
+                        pass
+
+            zt_cli(["join", self._nwid])
+            if moon:
+                zt_cli(["orbit", moon, moon])
+
+            self._connected = True
+            self._timer = GLib.timeout_add(1000, self._poll)
+
+        except Exception as e:
+            print(f"Connect error: {e}", file=sys.stderr)
+            self._set_state(FAILED)
+            self.Failure(1)
+
+    def _poll(self):
+        if not self._connected:
             return False
-
-    def _zt_cli(self, args):
-        return subprocess.run(
-            [ZT_BINARY, "-q", "-D" + ZT_HOME] + args,
-            capture_output=True, text=True, timeout=5,
-        )
-
-    def _zt_cli_json(self, args):
-        return subprocess.run(
-            [ZT_BINARY, "-q", "-j", "-D" + ZT_HOME] + args,
-            capture_output=True, text=True, timeout=5,
-        )
-
-    def _check_connected(self):
         try:
-            r = self._zt_cli_json(["listnetworks"])
-            networks = json.loads(r.stdout)
-            for net in networks:
-                if net.get("nwid") != self._network_id:
-                    continue
-                if net.get("status") != "OK":
+            nets = zt_json(["listnetworks"])
+            if not nets:
+                return True
+            for net in nets:
+                if net.get("nwid") != self._nwid or net.get("status") != "OK":
                     continue
                 dev = net.get("portDeviceName", "")
                 addrs = net.get("assignedAddresses", [])
+                zt_routes = net.get("routes", [])
+
+                # Find first IPv4 address
                 for addr in addrs:
                     if ":" in addr:
-                        continue  # skip IPv6
+                        continue
                     ip_str, prefix = addr.split("/")
-                    octets = ip_str.split(".")
-                    ip_int = (
-                        int(octets[0])
-                        | (int(octets[1]) << 8)
-                        | (int(octets[2]) << 16)
-                        | (int(octets[3]) << 24)
-                    )
-                    config = {
+
+                    config = dbus.Dictionary({
                         "tundev": dbus.String(dev, variant_level=1),
-                        "address": dbus.UInt32(ip_int, variant_level=1),
+                        "address": dbus.UInt32(ip2int(ip_str), variant_level=1),
                         "prefix": dbus.UInt32(int(prefix), variant_level=1),
-                        "gateway": dbus.UInt32(ip_int, variant_level=1),
-                        "never-default": dbus.Boolean(True, variant_level=1),
-                    }
+                    }, signature="sv")
+
+                    # Build routes from ZT network config
+                    routes = dbus.Array([], signature="au")
+                    for rt in zt_routes:
+                        tgt = rt.get("target", "")
+                        via = rt.get("via") or "0.0.0.0"
+                        if ":" in tgt:
+                            continue
+                        if tgt == "0.0.0.0/0" and self._never_default:
+                            continue
+                        t_ip, t_pfx = tgt.split("/")
+                        routes.append(
+                            dbus.Array([
+                                dbus.UInt32(ip2int(t_ip)),
+                                dbus.UInt32(int(t_pfx)),
+                                dbus.UInt32(ip2int(via)),
+                                dbus.UInt32(0),  # metric
+                            ], signature="u")
+                        )
+
+                    if routes:
+                        config["routes"] = dbus.Array(routes, signature="au",
+                                                      variant_level=1)
+
+                    # Find default gateway from ZT routes
+                    gw = None
+                    for rt in zt_routes:
+                        if rt.get("target") == "0.0.0.0/0" and rt.get("via"):
+                            gw = rt["via"]
+                            break
+                    # NM requires a gateway; use ZT gateway or self
+                    config["gateway"] = dbus.UInt32(
+                        ip2int(gw if gw else ip_str), variant_level=1)
+
                     self.Ip4Config(config)
-                    self._set_state(NM_VPN_STATE_STARTED)
-                    self._check_timer = None
+                    self._set_state(STARTED)
+                    self._timer = None
                     return False
+
         except Exception as e:
-            print(f"Check error: {e}", file=sys.stderr)
+            print(f"Poll error: {e}", file=sys.stderr)
         return True
 
 
 def main():
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
-    bus_name = dbus.service.BusName(NM_VPN_SERVICE_NAME, bus)
-    plugin = ZeroTierVPNPlugin(bus, NM_VPN_PLUGIN_PATH)
-
+    bus_name = dbus.service.BusName(NM_VPN_SERVICE, bus)
+    plugin = ZeroTierVPN(bus, NM_VPN_PATH)
     loop = GLib.MainLoop()
     signal.signal(signal.SIGTERM, lambda *_: loop.quit())
     signal.signal(signal.SIGINT, lambda *_: loop.quit())
-
     print("ZeroTier NM VPN plugin started", file=sys.stderr)
     loop.run()
 

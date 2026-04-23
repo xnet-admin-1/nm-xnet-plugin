@@ -3,3 +3,9 @@ name=zerotier
 service=org.freedesktop.NetworkManager.zerotier
 program=/usr/libexec/nm-zerotier-service
 supports-multiple-connections=false
+
+[libnm]
+plugin=libnm-vpn-plugin-zerotier-editor.so
+
+[GNOME]
+properties=libnm-vpn-plugin-zerotier-editor
