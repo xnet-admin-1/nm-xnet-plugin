@@ -8,4 +8,6 @@ supports-multiple-connections=false
 plugin=libnm-vpn-plugin-zerotier-editor.so
 
 [GNOME]
+auth-dialog=/usr/libexec/nm-zerotier-auth-dialog
 properties=libnm-vpn-plugin-zerotier-editor
+supports-hints=true

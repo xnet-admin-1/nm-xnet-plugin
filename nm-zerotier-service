@@ -102,7 +102,6 @@ class ZeroTierVPN(dbus.service.Object):
             vpn = connection.get("vpn", {})
             data = dict(vpn.get("data", {}))
             self._nwid = str(data.get("network-id", ""))
-            moon = str(data.get("moon-id", ""))
 
             if not self._nwid:
                 self._set_state(FAILED)
@@ -132,8 +131,6 @@ class ZeroTierVPN(dbus.service.Object):
                         pass
 
             zt_cli(["join", self._nwid])
-            if moon:
-                zt_cli(["orbit", moon, moon])
 
             self._connected = True
             self._timer = GLib.timeout_add(1000, self._poll)
