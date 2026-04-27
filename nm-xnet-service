@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NetworkManager VPN plugin for ZeroTier
+NetworkManager VPN plugin for XNet
 Copyright (C) 2025-present XNet Inc. Apache-2.0
 """
 
@@ -8,13 +8,13 @@ import sys, os, json, time, signal, subprocess, struct, socket
 import dbus, dbus.service, dbus.mainloop.glib
 from gi.repository import GLib
 
-NM_VPN_SERVICE = "org.freedesktop.NetworkManager.zerotier"
+NM_VPN_SERVICE = "org.freedesktop.NetworkManager.xnet"
 NM_VPN_PATH = "/org/freedesktop/NetworkManager/VPN/Plugin"
 
 INIT, STARTING, STARTED, STOPPING, STOPPED, FAILED = 1, 2, 3, 4, 5, 6
 
-ZT = "/usr/sbin/zerotier-one"
-ZT_HOME = "/var/lib/zerotier-one"
+ZT = "/usr/sbin/xnet-one"
+ZT_HOME = "/var/lib/xnet"
 
 
 def ip2int(s):
@@ -36,7 +36,7 @@ def zt_json(args):
     return json.loads(r.stdout) if r.returncode == 0 else None
 
 
-class ZeroTierVPN(dbus.service.Object):
+class XNetVPN(dbus.service.Object):
     def __init__(self, bus, path):
         super().__init__(bus, path)
         self._state = INIT
@@ -213,11 +213,11 @@ def main():
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
     bus_name = dbus.service.BusName(NM_VPN_SERVICE, bus)
-    plugin = ZeroTierVPN(bus, NM_VPN_PATH)
+    plugin = XNetVPN(bus, NM_VPN_PATH)
     loop = GLib.MainLoop()
     signal.signal(signal.SIGTERM, lambda *_: loop.quit())
     signal.signal(signal.SIGINT, lambda *_: loop.quit())
-    print("ZeroTier NM VPN plugin started", file=sys.stderr)
+    print("XNet NM VPN plugin started", file=sys.stderr)
     loop.run()
 
 

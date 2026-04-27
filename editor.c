@@ -1,12 +1,12 @@
 /*
- * NM VPN editor plugin for ZeroTier
- * Build: gcc -shared -fPIC -o libnm-vpn-plugin-zerotier-editor.so editor.c \
+ * NM VPN editor plugin for XNet
+ * Build: gcc -shared -fPIC -o libnm-vpn-plugin-xnet-editor.so editor.c \
  *        $(pkg-config --cflags --libs libnm gtk4)
  */
 #include <gtk/gtk.h>
 #include <NetworkManager.h>
 
-#define ZT_SERVICE "org.freedesktop.NetworkManager.zerotier"
+#define ZT_SERVICE "org.freedesktop.NetworkManager.xnet"
 
 /* ── Editor ── */
 
@@ -91,8 +91,8 @@ static guint32 zt_pl_get_caps(NMVpnEditorPlugin *p) { return 0; }
 
 static void zt_pl_get_prop(GObject *obj, guint id, GValue *val, GParamSpec *ps) {
     switch (id) {
-    case PROP_NAME:    g_value_set_string(val, "ZeroTier"); break;
-    case PROP_DESC:    g_value_set_string(val, "ZeroTier VPN connection"); break;
+    case PROP_NAME:    g_value_set_string(val, "XNet"); break;
+    case PROP_DESC:    g_value_set_string(val, "XNet VPN connection"); break;
     case PROP_SERVICE: g_value_set_string(val, ZT_SERVICE); break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID(obj, id, ps);
     }

@@ -1,0 +1,13 @@
+[VPN Connection]
+name=xnet
+service=org.freedesktop.NetworkManager.xnet
+program=/usr/libexec/nm-xnet-service
+supports-multiple-connections=false
+
+[libnm]
+plugin=libnm-vpn-plugin-xnet-editor.so
+
+[GNOME]
+auth-dialog=/usr/libexec/nm-xnet-auth-dialog
+properties=libnm-vpn-plugin-xnet-editor
+supports-hints=true
